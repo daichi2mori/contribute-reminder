@@ -7,24 +7,50 @@ on:
 jobs:
   check-and-notify:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check for Contributions on Main and Master Branches
+      - name: Install jq
+        run: sudo apt-get install jq
+
+      - name: Check for Contributions on Public Repositories and Count Repository Creations
         id: check_contributions
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          DATE=$(date -u +"%Y-%m-%dT00:00:00Z")
+          # ユーザー名を取得
           USERNAME="${{ github.repository_owner }}"
-          QUERY="{\"query\": \"query { user(login: \\\"$USERNAME\\\") { contributionsCollection(from: \\\"$DATE\\\", to: \\\"$DATE\\\") { commitContributionsByRepository { repository { name, defaultBranchRef { name } } contributions(first: 100) { totalCount } } } } }\"}"
 
-          RESPONSE=$(curl -H "Authorization: bearer $GITHUB_TOKEN" -H "Content-Type: application/json" -d "$QUERY" https://api.github.com/graphql)
+          # GraphQLクエリでpublicリポジトリのコミット数とリポジトリ作成数を取得
+          QUERY="{\"query\": \"query { user(login: \\\"$USERNAME\\\") { contributionsCollection { commitContributionsByRepository { repository { name, isPrivate, defaultBranchRef { name } } contributions(first: 100) { totalCount } } repositoryCreated(first: 100) { totalCount } } } }\"}"
+
+          # GitHub APIリクエストとエラーハンドリング
+          RESPONSE=$(curl -H "Authorization: bearer $GITHUB_TOKEN" -H "Content-Type: application/json" -d "$QUERY" https://api.github.com/graphql || { echo 'GitHub APIリクエストに失敗しました'; exit 1; })
+
           echo "Response: $RESPONSE"
-          MAIN_COUNT=$(echo $RESPONSE | jq '[.data.user.contributionsCollection.commitContributionsByRepository[] | select(.repository.defaultBranchRef.name == "main") | .contributions.totalCount] | add // 0')
-          MASTER_COUNT=$(echo $RESPONSE | jq '[.data.user.contributionsCollection.commitContributionsByRepository[] | select(.repository.defaultBranchRef.name == "master") | .contributions.totalCount] | add // 0')
-          TOTAL_COUNT=$(($MAIN_COUNT + $MASTER_COUNT))
 
-          echo "Total contributions to main and master: $TOTAL_COUNT"
-          echo "CONTRIBUTIONS_COUNT=$TOTAL_COUNT" >> $GITHUB_ENV
+          # publicなリポジトリのコミット数をカウント
+          MAIN_COUNT=$(echo $RESPONSE | jq '[.data.user.contributionsCollection.commitContributionsByRepository[] | select(.repository.defaultBranchRef.name == "main" and .repository.isPrivate == false) | .contributions.totalCount] | add // 0')
+          MASTER_COUNT=$(echo $RESPONSE | jq '[.data.user.contributionsCollection.commitContributionsByRepository[] | select(.repository.defaultBranchRef.name == "master" and .repository.isPrivate == false) | .contributions.totalCount] | add // 0')
+
+          # 作成されたpublicリポジトリの数を取得
+          REPO_CREATION_COUNT=$(echo $RESPONSE | jq '.data.user.contributionsCollection.repositoryCreated.totalCount')
+
+          # コミット数とリポジトリ作成数の合計を計算
+          TOTAL_COUNT=$(($MAIN_COUNT + $MASTER_COUNT + $REPO_CREATION_COUNT))
+
+          # 結果を表示
+          echo "Total contributions to main and master (public only): $TOTAL_COUNT"
+          echo "Public repository creations: $REPO_CREATION_COUNT"
+
+          # 詳細な結果を表示
+          echo "Commit counts per repository (public only):"
+          echo $RESPONSE | jq '.data.user.contributionsCollection.commitContributionsByRepository[] | select(.repository.isPrivate == false) | {repo: .repository.name, branch: .repository.defaultBranchRef.name, count: .contributions.totalCount}'
+
+          # コミット数またはリポジトリ作成数が0の場合、通知を送信
+          if [ "$TOTAL_COUNT" -eq 0 ]; then
+            echo "今日の貢献がありません。通知を送信します。"
+            echo "CONTRIBUTIONS_COUNT=$TOTAL_COUNT" >> $GITHUB_ENV
+          fi
 
       - name: Send LINE Notification if No Contributions
         if: env.CONTRIBUTIONS_COUNT == '0'
